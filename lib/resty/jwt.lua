@@ -7,6 +7,8 @@ local cipher = require "resty.openssl.cipher"
 
 local _M = { _VERSION = "0.2.3" }
 
+_M.evp = evp
+
 local mt = {
     __index = _M
 }
@@ -873,10 +875,17 @@ function _M.verify_jwt_obj(self, secret, jwt_obj, ...)
         return jwt_obj
       end
     elseif secret ~= nil then
-      if secret:find("CERTIFICATE") then
-        cert, err = evp.Cert:new(secret)
-      elseif secret:find("PUBLIC KEY") then
-        cert, err = evp.PublicKey:new(secret)
+      if type(secret) == "table" then
+        if secret.public_key then
+          -- this was already parsed
+          cert = secret
+        end
+      elseif type(secret) == "string" then
+        if secret:find("CERTIFICATE") then
+          cert, err = evp.Cert:new(secret)
+        elseif secret:find("PUBLIC KEY") then
+          cert, err = evp.PublicKey:new(secret)
+        end
       end
       if not cert then
         jwt_obj[str_const.reason] = "Decode secret is not a valid cert/public key"
