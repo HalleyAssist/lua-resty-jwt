@@ -897,7 +897,7 @@ function _M.verify_jwt_obj(self, secret, jwt_obj, ...)
       jwt_obj[str_const.reason] = "No trusted certs loaded"
       return jwt_obj
     end
-    local verifier = ''
+    local verifier
     if alg == str_const.RS256 or alg == str_const.RS512 then
       verifier = evp.RSAVerifier:new(cert)
     elseif alg == str_const.ES256 or alg == str_const.ES512 then
