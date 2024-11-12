@@ -569,7 +569,7 @@ function _M.sign(self, secret_key, jwt_obj)
     local secret_str = get_secret_str(secret_key, jwt_obj)
     signature = hmac:new(secret_str, hmac.ALGOS.SHA512):final(message)
   elseif alg == str_const.RS256 or alg == str_const.RS512 then
-    local signer, err = evp.RSASigner:new(secret_key)
+    local signer, err = evp.RSASigner.new(secret_key)
     if not signer then
       error({reason="signer error: " .. err})
     end
@@ -859,7 +859,7 @@ function _M.verify_jwt_obj(self, secret, jwt_obj, ...)
       jwt_obj[str_const.reason] = "signature mismatch: " .. jwt_obj[str_const.signature]
     end
   elseif alg == str_const.RS256 or alg == str_const.RS512 or alg == str_const.ES256 or alg == str_const.ES512 then
-    local cert, err
+    local cert, err, verifier
     if self.trusted_certs_file ~= nil then
       local cert_str = extract_certificate(jwt_obj, self.x5u_content_retriever)
       if not cert_str then
@@ -877,31 +877,32 @@ function _M.verify_jwt_obj(self, secret, jwt_obj, ...)
         return jwt_obj
       end
     elseif secret ~= nil then
-      if type(secret) == "table" then
-        if secret.public_key then
-          -- this was already parsed
-          cert = secret
-        end
-      elseif type(secret) == "string" then
+      if type(secret) == "string" then
         if secret:find("CERTIFICATE") then
-          cert, err = evp.Cert:new(secret)
+          cert, err = evp.Cert.new(secret)
         elseif secret:find("PUBLIC KEY") then
-          cert, err = evp.PublicKey:new(secret)
+          cert, err = evp.PublicKey.new(secret)
         end
+      elseif secret.verify then
+        verifier = secret
+      elseif secret.public_key then
+        -- this was already parsed
+        cert = secret
       end
-      if not cert then
-        jwt_obj[str_const.reason] = "Decode secret is not a valid cert/public key"
-        return jwt_obj
+      if not verifier then
+        if not cert then
+          jwt_obj[str_const.reason] = "Decode secret is not a valid cert/public key"
+          return jwt_obj
+        end
+        if alg == str_const.RS256 or alg == str_const.RS512 then
+          verifier = evp.RSAVerifier:new(cert)
+        elseif alg == str_const.ES256 or alg == str_const.ES512 then
+          verifier = evp.ECVerifier:new(cert)
+        end
       end
     else
       jwt_obj[str_const.reason] = "No trusted certs loaded"
       return jwt_obj
-    end
-    local verifier
-    if alg == str_const.RS256 or alg == str_const.RS512 then
-      verifier = evp.RSAVerifier:new(cert)
-    elseif alg == str_const.ES256 or alg == str_const.ES512 then
-      verifier = evp.ECVerifier:new(cert)
     end
     if not verifier then
       -- Internal error case, should not happen...
@@ -913,7 +914,7 @@ function _M.verify_jwt_obj(self, secret, jwt_obj, ...)
     local raw_header = get_raw_part(str_const.header, jwt_obj)
     local raw_payload = get_raw_part(str_const.payload, jwt_obj)
 
-    local message =string_format(str_const.regex_join_msg, raw_header ,  raw_payload)
+    local message = string_format(str_const.regex_join_msg, raw_header, raw_payload)
     local sig = _M:jwt_decode(jwt_obj[str_const.signature], false)
 
     if not sig then

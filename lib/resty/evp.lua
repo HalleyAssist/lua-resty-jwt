@@ -187,7 +187,6 @@ int EVP_PKEY_decrypt(EVP_PKEY_CTX *ctx,
                         unsigned char *out, size_t *outlen,
                         const unsigned char *in, size_t inlen);
 
-
 ]]
 
 
@@ -206,7 +205,7 @@ local function _err(ret)
     return ret, table.concat(errs, ": ")
 end
 
-local ctx_new, ctx_free
+local ctx_new, ctx_free, ctx_freefn
 local openssl11, e = pcall(function ()
     local ctx = _C.EVP_MD_CTX_new()
     _C.EVP_MD_CTX_free(ctx)
@@ -218,16 +217,18 @@ if openssl11 then
     ctx_new = function ()
         return _C.EVP_MD_CTX_new()
     end
+    ctx_freefn = _C.EVP_MD_CTX_free
     ctx_free = function (ctx)
-        ffi_gc(ctx, _C.EVP_MD_CTX_free)
+        ffi_gc(ctx, ctx_freefn)
     end
 else
     ctx_new = function ()
         local ctx = _C.EVP_MD_CTX_create()
         return ctx
     end
+    ctx_freefn = _C.EVP_MD_CTX_destroy
     ctx_free = function (ctx)
-        ffi_gc(ctx, _C.EVP_MD_CTX_destroy)
+        ffi_gc(ctx, ctx_freefn)
     end
 end
 
@@ -319,11 +320,15 @@ end
 local RSASigner = {algo="RSA"}
 _M.RSASigner = RSASigner
 
+local rsaSignerMeta = { __index = RSASigner }
+
 --- Create a new RSASigner
 -- @param pem_private_key A private key string in PEM format
 -- @param password password for the private key (if required)
 -- @returns RSASigner, err_string
-function RSASigner.new(self, pem_private_key, password)
+function RSASigner.new(pem_private_key, password)
+    local self = {}
+    setmetatable(self, rsaSignerMeta)
     return _new_key (
         self,
         {
@@ -442,8 +447,7 @@ function RSAVerifier.new(self, key_source)
     if not key_source then
         return nil, "You must pass in an key_source for a public key"
     end
-    local evp_public_key = key_source.public_key
-    self.evp_pkey = evp_public_key
+    self.key_source = key_source.public_key
     return self, nil
 end
 
@@ -462,24 +466,28 @@ function RSAVerifier.verify(self, message, sig, digest_name)
     if ctx == nil then
         return _err(false)
     end
-    ctx_free(ctx)
 
     if _C.EVP_DigestInit_ex(ctx, md, nil) ~= 1 then
+        ctx_freefn(ctx)
         return _err(false)
     end
 
-    local ret = _C.EVP_DigestVerifyInit(ctx, nil, md, nil, self.evp_pkey)
+    local ret = _C.EVP_DigestVerifyInit(ctx, nil, md, nil, self.key_source)
     if ret ~= 1 then
+        ctx_freefn(ctx)
         return _err(false)
     end
     if _C.EVP_DigestUpdate(ctx, message, #message) ~= 1 then
+        ctx_freefn(ctx)
         return _err(false)
     end
     local sig_bin = ffi_new("unsigned char[?]", #sig)
     ffi_copy(sig_bin, sig, #sig)
     if _C.EVP_DigestVerifyFinal(ctx, sig_bin, #sig) == 1 then
+        ctx_freefn(ctx)
         return true, nil
     else
+        ctx_freefn(ctx)
         return false, "Verification failed"
     end
 end
@@ -559,16 +567,20 @@ end
 local Cert = {}
 _M.Cert = Cert
 
+local mtCert = { __index = Cert }
+
 
 --- Create a new Certificate object
 -- @param payload A PEM or DER format X509 certificate
 -- @returns Cert, error_string
-function Cert.new(self, payload)
+function Cert.new(payload)
     if not payload then
         return nil, "Must pass a PEM or binary DER cert"
     end
+
     local bio = _C.BIO_new(_C.BIO_s_mem())
     ffi_gc(bio, _C.BIO_vfree)
+    
     local x509
     if payload:find('-----BEGIN') then
         if _C.BIO_puts(bio, payload) < 0 then
@@ -585,15 +597,19 @@ function Cert.new(self, payload)
         return _err()
     end
     ffi_gc(x509, _C.X509_free)
+
+    local self = {}
     self.x509 = x509
+
+    setmetatable(self, mtCert)
+
     local public_key, err = self:get_public_key()
     if not public_key then
         return nil, err
     end
 
-    ffi_gc(public_key, _C.EVP_PKEY_free)
-
     self.public_key = public_key
+    
     return self, nil
 end
 
@@ -637,6 +653,8 @@ function Cert.get_public_key(self)
         return _err()
     end
 
+    ffi_gc(evp_pkey, _C.EVP_PKEY_free)
+
     return evp_pkey, nil
 end
 
@@ -676,6 +694,8 @@ end
 local PublicKey = {}
 _M.PublicKey = PublicKey
 
+local mtPublicKey = { __index = PublicKey }
+
 --- Create a new PublicKey object
 --
 -- If a PEM fornatted key is provided, the key must start with
@@ -684,12 +704,14 @@ _M.PublicKey = PublicKey
 --
 -- @param payload A PEM or DER format public key file
 -- @return PublicKey, error_string
-function PublicKey.new(self, payload)
+function PublicKey.new(payload)
     if not payload then
         return nil, "Must pass a PEM or binary DER public key"
     end
+    
     local bio = _C.BIO_new(_C.BIO_s_mem())
     ffi_gc(bio, _C.BIO_vfree)
+
     local pkey
     if payload:find('-----BEGIN') then
         if _C.BIO_puts(bio, payload) < 0 then
@@ -705,8 +727,13 @@ function PublicKey.new(self, payload)
     if pkey == nil then
         return _err()
     end
+
+    local self = {}
     ffi_gc(pkey, _C.EVP_PKEY_free)
     self.public_key = pkey
+
+    setmetatable(self, mtPublicKey)
+
     return self, nil
 end
 
