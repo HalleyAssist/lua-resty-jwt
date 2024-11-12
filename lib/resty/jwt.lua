@@ -812,6 +812,8 @@ local function validate_claims(self, jwt_obj, ...)
   return true
 end
 
+_M.validate_claims = validate_claims
+
 --@function verify jwt object
 --@param secret
 --@param jwt_object
