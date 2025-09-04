@@ -65,6 +65,7 @@ EC_KEY * PEM_read_bio_ECPrivateKey(BIO *bp, EC_KEY **key, pem_password_cb *cb,
 								void *u);
 EC_KEY * PEM_read_bio_ECPublicKey(BIO *bp, EC_KEY **key, pem_password_cb *cb,
                                 void *u);
+
 // EVP PKEY
 typedef struct evp_pkey_st EVP_PKEY;
 typedef struct engine_st ENGINE;
@@ -75,6 +76,7 @@ EVP_PKEY *EVP_PKEY_new_mac_key(int type, ENGINE *e,
                                const unsigned char *key, int keylen);
 void EVP_PKEY_free(EVP_PKEY *key);
 int i2d_RSA(RSA *a, unsigned char **out);
+EVP_PKEY *d2i_PUBKEY_bio(BIO *bp, EVP_PKEY **x);
 
 // Additional typedef of ECC operations (DER/RAW sig conversion)
 typedef struct bignum_st BIGNUM;
