@@ -361,23 +361,30 @@ function RSASigner.sign(self, message, digest_name)
 
     local md = _C.EVP_get_digestbyname(digest_name)
     if md == nil then
+        ctx_freefn(ctx)
         return _err()
     end
 
     if _C.EVP_DigestInit_ex(ctx, md, nil) ~= 1 then
+        ctx_freefn(ctx)
         return _err()
     end
 
     local ret = _C.EVP_DigestSignInit(ctx, nil, md, nil, self.evp_pkey)
     if  ret ~= 1 then
+        ctx_freefn(ctx)
         return _err()
     end
     if _C.EVP_DigestUpdate(ctx, message, #message) ~= 1 then
-         return _err()
-    end
-    if _C.EVP_DigestSignFinal(ctx, buf, len) ~= 1 then
+        ctx_freefn(ctx)
         return _err()
     end
+    if _C.EVP_DigestSignFinal(ctx, buf, len) ~= 1 then
+        ctx_freefn(ctx)
+        return _err()
+    end
+    
+    ctx_freefn(ctx)
     return ffi_string(buf, len[0]), nil
 end
 
