@@ -219,18 +219,22 @@ if openssl11 then
     ctx_new = function ()
         return _C.EVP_MD_CTX_new()
     end
-    ctx_freefn = _C.EVP_MD_CTX_free
+    ctx_freefn = function(ctx)
+        _C.EVP_MD_CTX_free(ffi_gc(ctx, nil))
+    end
     ctx_free = function (ctx)
-        ffi_gc(ctx, ctx_freefn)
+        ffi_gc(ctx, _C.EVP_MD_CTX_free)
     end
 else
     ctx_new = function ()
         local ctx = _C.EVP_MD_CTX_create()
         return ctx
     end
-    ctx_freefn = _C.EVP_MD_CTX_destroy
+    ctx_freefn = function(ctx)
+        _C.EVP_MD_CTX_destroy(ffi_gc(ctx, nil))
+    end
     ctx_free = function (ctx)
-        ffi_gc(ctx, ctx_freefn)
+        ffi_gc(ctx, _C.EVP_MD_CTX_free)
     end
 end
 
