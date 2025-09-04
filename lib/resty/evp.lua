@@ -449,6 +449,9 @@ function RSAVerifier.new(self, key_source)
     if not key_source then
         return nil, "You must pass in an key_source for a public key"
     end
+    if not key_source.public_key then
+        return nil, "key_source does not have a public_key property"
+    end
     self.key_source = key_source.public_key
     return self, nil
 end
