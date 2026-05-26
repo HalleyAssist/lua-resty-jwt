@@ -573,10 +573,14 @@ function _M.sign(self, secret_key, jwt_obj)
     if not signer then
       error({reason="signer error: " .. err})
     end
+    local sign_err
     if alg == str_const.RS256 then
-      signature = signer:sign(message, evp.CONST.SHA256_DIGEST)
+      signature, sign_err = signer:sign(message, evp.CONST.SHA256_DIGEST)
     elseif alg == str_const.RS512 then
-      signature = signer:sign(message, evp.CONST.SHA512_DIGEST)
+      signature, sign_err = signer:sign(message, evp.CONST.SHA512_DIGEST)
+    end
+    if not signature then
+      error({reason="signature error: " .. (sign_err or str_const.internal_error)})
     end
   elseif alg == str_const.ES256 or alg == str_const.ES512 then
     local signer, err = evp.ECSigner:new(secret_key)

@@ -70,6 +70,8 @@ EC_KEY * PEM_read_bio_ECPublicKey(BIO *bp, EC_KEY **key, pem_password_cb *cb,
 typedef struct evp_pkey_st EVP_PKEY;
 typedef struct engine_st ENGINE;
 EVP_PKEY *EVP_PKEY_new(void);
+EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x,
+                                  pem_password_cb *cb, void *u);
 int EVP_PKEY_set1_RSA(EVP_PKEY *pkey,RSA *key);
 int EVP_PKEY_set1_EC_KEY(EVP_PKEY *pkey,EC_KEY *key);
 EVP_PKEY *EVP_PKEY_new_mac_key(int type, ENGINE *e,
@@ -252,34 +254,12 @@ local function _new_key(self, opts)
         ffi_copy(pass, opts.password, plen)
     end
 
-    local key = nil
-    if self.algo == "RSA" then
-       key = _C.PEM_read_bio_RSAPrivateKey(bio, nil, nil, pass)
-       ffi_gc(key, _C.RSA_free)
-    elseif self.algo == "ECDSA" then
-        key = _C.PEM_read_bio_ECPrivateKey(bio, nil, nil, pass)
-        ffi_gc(key, _C.EC_KEY_free)
-    end
-
-    if not key then
-        return _err()
-    end
-
-    local evp_pkey = _C.EVP_PKEY_new()
-    if evp_pkey == nil then
+    local evp_pkey = _C.PEM_read_bio_PrivateKey(bio, nil, nil, pass)
+    if not evp_pkey then
         return _err()
     end
 
     ffi_gc(evp_pkey, _C.EVP_PKEY_free)
-    if self.algo == "RSA" then
-        if _C.EVP_PKEY_set1_RSA(evp_pkey, key) ~= 1 then
-           return _err()
-        end
-    elseif self.algo == "ECDSA" then
-        if _C.EVP_PKEY_set1_EC_KEY(evp_pkey, key) ~= 1 then
-            return _err()
-        end
-    end
 
     self.evp_pkey = evp_pkey
     return self, nil
