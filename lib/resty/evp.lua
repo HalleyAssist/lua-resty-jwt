@@ -14,6 +14,8 @@ local ngx = ngx
 local CONST = {
     SHA256_DIGEST = "SHA256",
     SHA512_DIGEST = "SHA512",
+    NID_sha256 = 672,
+    NID_sha512 = 674,
     -- ref : https://github.com/openssl/openssl/blob/master/include/openssl/rsa.h
     RSA_PKCS1_PADDING = 1,
     RSA_SSLV23_PADDING = 2,
@@ -52,6 +54,10 @@ int    BIO_write(BIO *b, const void *buf, int len);
 typedef struct rsa_st RSA;
 int RSA_size(const RSA *rsa);
 void RSA_free(RSA *rsa);
+int RSA_sign(int type, const unsigned char *m, unsigned int m_length,
+             unsigned char *sigret, unsigned int *siglen, RSA *rsa);
+int RSA_verify(int type, const unsigned char *m, unsigned int m_length,
+               const unsigned char *sigbuf, unsigned int siglen, RSA *rsa);
 typedef int pem_password_cb(char *buf, int size, int rwflag, void *userdata);
 RSA * PEM_read_bio_RSAPrivateKey(BIO *bp, RSA **rsa, pem_password_cb *cb,
 								void *u);
@@ -74,6 +80,7 @@ EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x,
                                   pem_password_cb *cb, void *u);
 int EVP_PKEY_set1_RSA(EVP_PKEY *pkey,RSA *key);
 int EVP_PKEY_set1_EC_KEY(EVP_PKEY *pkey,EC_KEY *key);
+RSA *EVP_PKEY_get1_RSA(EVP_PKEY *pkey);
 EVP_PKEY *EVP_PKEY_new_mac_key(int type, ENGINE *e,
                                const unsigned char *key, int keylen);
 void EVP_PKEY_free(EVP_PKEY *key);
@@ -156,6 +163,9 @@ EVP_MD_CTX *EVP_MD_CTX_new(void);
 void    EVP_MD_CTX_free(EVP_MD_CTX *ctx);
 
 int     EVP_DigestInit_ex(EVP_MD_CTX *ctx, const EVP_MD *type, ENGINE *impl);
+int     EVP_Digest(const void *data, size_t count,
+                   unsigned char *md, unsigned int *size,
+                   const EVP_MD *type, ENGINE *impl);
 int     EVP_DigestSignInit(EVP_MD_CTX *ctx, EVP_PKEY_CTX **pctx,
                         const EVP_MD *type, ENGINE *e, EVP_PKEY *pkey);
 int     EVP_DigestUpdate(EVP_MD_CTX *ctx,const void *d,
@@ -324,15 +334,39 @@ function RSASigner.new(pem_private_key, password)
     )
 end
 
+local function _resolve_rsa_digest(digest_name)
+    if digest_name == CONST.SHA256_DIGEST then
+        return CONST.NID_sha256, 32
+    end
 
---- Sign a message
--- @param message The message to sign
--- @param digest_name The digest format to use (e.g., "SHA256")
--- @returns signature, error_string
-function RSASigner.sign(self, message, digest_name)
-    local buf = ffi_new("unsigned char[?]", 1024)
-    local len = ffi_new("size_t[1]", 1024)
+    if digest_name == CONST.SHA512_DIGEST then
+        return CONST.NID_sha512, 64
+    end
 
+    return nil, nil
+end
+
+local function _digest_message(message, digest_name)
+    local md = _C.EVP_get_digestbyname(digest_name)
+    if md == nil then
+        return nil, "Unknown message digest"
+    end
+
+    local _, digest_len = _resolve_rsa_digest(digest_name)
+    if not digest_len then
+        return nil, "Unsupported RSA digest"
+    end
+
+    local digest = ffi_new("unsigned char[?]", digest_len)
+    local written = ffi_new("unsigned int[1]", digest_len)
+    if _C.EVP_Digest(message, #message, digest, written, md, nil) ~= 1 then
+        return _err()
+    end
+
+    return digest, written[0], nil
+end
+
+local function _sign_with_evp_pkey(pkey, message, digest_name)
     local ctx = ctx_new()
     if ctx == nil then
         return _err()
@@ -342,15 +376,10 @@ function RSASigner.sign(self, message, digest_name)
     local md = _C.EVP_get_digestbyname(digest_name)
     if md == nil then
         ctx_freefn(ctx)
-        return _err()
+        return nil, "Unknown message digest"
     end
 
-    if _C.EVP_DigestInit_ex(ctx, md, nil) ~= 1 then
-        ctx_freefn(ctx)
-        return _err()
-    end
-
-    local ret = _C.EVP_DigestSignInit(ctx, nil, md, nil, self.evp_pkey)
+    local ret = _C.EVP_DigestSignInit(ctx, nil, md, nil, pkey)
     if  ret ~= 1 then
         ctx_freefn(ctx)
         return _err()
@@ -359,13 +388,84 @@ function RSASigner.sign(self, message, digest_name)
         ctx_freefn(ctx)
         return _err()
     end
+
+    local len = ffi_new("size_t[1]", 0)
+    if _C.EVP_DigestSignFinal(ctx, nil, len) ~= 1 then
+        ctx_freefn(ctx)
+        return _err()
+    end
+
+    local buf = ffi_new("unsigned char[?]", len[0])
     if _C.EVP_DigestSignFinal(ctx, buf, len) ~= 1 then
         ctx_freefn(ctx)
         return _err()
     end
-    
+
     ctx_freefn(ctx)
     return ffi_string(buf, len[0]), nil
+end
+
+local function _verify_with_evp_pkey(pkey, message, sig, digest_name)
+    local md = _C.EVP_get_digestbyname(digest_name)
+    if md == nil then
+        return nil, "Unknown message digest"
+    end
+
+    local ctx = ctx_new()
+    if ctx == nil then
+        return _err(false)
+    end
+
+    local ret = _C.EVP_DigestVerifyInit(ctx, nil, md, nil, pkey)
+    if ret ~= 1 then
+        ctx_freefn(ctx)
+        return _err(false)
+    end
+    if _C.EVP_DigestUpdate(ctx, message, #message) ~= 1 then
+        ctx_freefn(ctx)
+        return _err(false)
+    end
+    local sig_bin = ffi_new("unsigned char[?]", #sig)
+    ffi_copy(sig_bin, sig, #sig)
+    if _C.EVP_DigestVerifyFinal(ctx, sig_bin, #sig) == 1 then
+        ctx_freefn(ctx)
+        return true, nil
+    end
+
+    ctx_freefn(ctx)
+    local _, err = _err(false)
+    if err == "Zero error code (null arguments?)" then
+        return false, "Verification failed"
+    end
+    return false, err
+end
+
+
+--- Sign a message
+-- @param message The message to sign
+-- @param digest_name The digest format to use (e.g., "SHA256")
+-- @returns signature, error_string
+function RSASigner.sign(self, message, digest_name)
+    local rsa = _C.EVP_PKEY_get1_RSA(self.evp_pkey)
+    if rsa == nil then
+        return _sign_with_evp_pkey(self.evp_pkey, message, digest_name)
+    end
+
+    ffi_gc(rsa, _C.RSA_free)
+
+    local digest, digest_len, err = _digest_message(message, digest_name)
+    if not digest then
+        return nil, err
+    end
+
+    local nid = _resolve_rsa_digest(digest_name)
+    local siglen = ffi_new("unsigned int[1]", _C.RSA_size(rsa))
+    local sigbuf = ffi_new("unsigned char[?]", siglen[0])
+    if _C.RSA_sign(nid, digest, digest_len, sigbuf, siglen, rsa) ~= 1 then
+        return _err()
+    end
+
+    return ffi_string(sigbuf, siglen[0]), nil
 end
 
 
@@ -385,7 +485,7 @@ end
 -- @param digest_name The digest format to use (e.g., "SHA256")
 -- @returns signature, error_string
 function ECSigner.sign(self, message, digest_name)
-    return RSASigner.sign(self, message, digest_name)
+    return _sign_with_evp_pkey(self.evp_pkey, message, digest_name)
 end
 
 --- Converts a ASN.1 DER signature to RAW r,s
@@ -453,39 +553,30 @@ end
 -- @param digest_name The digest type that was used to sign
 -- @returns bool, error_string
 function RSAVerifier.verify(self, message, sig, digest_name)
-    local md = _C.EVP_get_digestbyname(digest_name)
-    if md == nil then
-        return _err(false)
+    local rsa = _C.EVP_PKEY_get1_RSA(self.key_source)
+    if rsa == nil then
+        return _verify_with_evp_pkey(self.key_source, message, sig, digest_name)
     end
 
-    local ctx = ctx_new()
-    if ctx == nil then
-        return _err(false)
+    ffi_gc(rsa, _C.RSA_free)
+
+    local digest, digest_len, err = _digest_message(message, digest_name)
+    if not digest then
+        return false, err
     end
 
-    if _C.EVP_DigestInit_ex(ctx, md, nil) ~= 1 then
-        ctx_freefn(ctx)
-        return _err(false)
-    end
-
-    local ret = _C.EVP_DigestVerifyInit(ctx, nil, md, nil, self.key_source)
-    if ret ~= 1 then
-        ctx_freefn(ctx)
-        return _err(false)
-    end
-    if _C.EVP_DigestUpdate(ctx, message, #message) ~= 1 then
-        ctx_freefn(ctx)
-        return _err(false)
-    end
+    local nid = _resolve_rsa_digest(digest_name)
     local sig_bin = ffi_new("unsigned char[?]", #sig)
     ffi_copy(sig_bin, sig, #sig)
-    if _C.EVP_DigestVerifyFinal(ctx, sig_bin, #sig) == 1 then
-        ctx_freefn(ctx)
+    if _C.RSA_verify(nid, digest, digest_len, sig_bin, #sig, rsa) == 1 then
         return true, nil
-    else
-        ctx_freefn(ctx)
+    end
+
+    local _, verify_err = _err(false)
+    if verify_err == "Zero error code (null arguments?)" then
         return false, "Verification failed"
     end
+    return false, verify_err
 end
 
 local ECVerifier = {}
@@ -508,7 +599,7 @@ function ECVerifier.verify(self, message, sig, digest_name)
     if not der_sig then
         return nil, err
     end
-    return RSAVerifier.verify(self, message, der_sig, digest_name)
+    return _verify_with_evp_pkey(self.key_source, message, der_sig, digest_name)
 end
 
 --- Converts a RAW r,s signature to ASN.1 DER signature (ECDSA)
