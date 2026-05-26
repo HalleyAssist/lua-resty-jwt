@@ -261,7 +261,7 @@ local function parse_jwe(self, preshared_key, encoded_header, encoded_encrypted_
     error({reason="invalid algorithm: " .. alg})
   end
 
-  local key, enc_key
+  local key, _, enc_key
   if alg == str_const.DIR then
     if not preshared_key  then
         error({reason="preshared key must not be null"})
@@ -275,7 +275,8 @@ local function parse_jwe(self, preshared_key, encoded_header, encoded_encrypted_
     if err then
         error({reason="failed to create rsa object: ".. err})
     end
-    local secret_key, err = rsa_decryptor:decrypt(_M:jwt_decode(encoded_encrypted_key))
+    local secret_key
+    secret_key, err = rsa_decryptor:decrypt(_M:jwt_decode(encoded_encrypted_key))
     if err or not secret_key then
        error({reason="failed to decrypt key: " .. err})
     end
@@ -465,7 +466,7 @@ local function sign_jwe(self, secret_key, jwt_obj)
   end
 
   -- TODO: implement logic for creating enc key and mac key and then encrypt key
-  local key, encrypted_key, mac_key, enc_key
+  local key, encrypted_key, _, mac_key, enc_key
   local encoded_header = _M:jwt_encode(header)
   local payload_to_encrypt = get_payload_encoder(self)(jwt_obj.payload)
   if alg ==  str_const.DIR then

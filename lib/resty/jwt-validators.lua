@@ -395,7 +395,6 @@ end)
       val >= (system_clock() - system_leeway) and val <= (system_clock() + system_leeway).
 ]]--
 define_validator("is_at", function()
-  local now = system_clock()
   return format_date_on_error(
     _M.chain(validate_is_date,
              function(val)
