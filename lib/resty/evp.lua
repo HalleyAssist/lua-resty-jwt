@@ -14,8 +14,6 @@ local ngx = ngx
 local CONST = {
     SHA256_DIGEST = "SHA256",
     SHA512_DIGEST = "SHA512",
-    NID_sha256 = 672,
-    NID_sha512 = 674,
     -- ref : https://github.com/openssl/openssl/blob/master/include/openssl/rsa.h
     RSA_PKCS1_PADDING = 1,
     RSA_SSLV23_PADDING = 2,
@@ -54,10 +52,6 @@ int    BIO_write(BIO *b, const void *buf, int len);
 typedef struct rsa_st RSA;
 int RSA_size(const RSA *rsa);
 void RSA_free(RSA *rsa);
-int RSA_sign(int type, const unsigned char *m, unsigned int m_length,
-             unsigned char *sigret, unsigned int *siglen, RSA *rsa);
-int RSA_verify(int type, const unsigned char *m, unsigned int m_length,
-               const unsigned char *sigbuf, unsigned int siglen, RSA *rsa);
 typedef int pem_password_cb(char *buf, int size, int rwflag, void *userdata);
 RSA * PEM_read_bio_RSAPrivateKey(BIO *bp, RSA **rsa, pem_password_cb *cb,
 								void *u);
@@ -80,7 +74,6 @@ EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x,
                                   pem_password_cb *cb, void *u);
 int EVP_PKEY_set1_RSA(EVP_PKEY *pkey,RSA *key);
 int EVP_PKEY_set1_EC_KEY(EVP_PKEY *pkey,EC_KEY *key);
-RSA *EVP_PKEY_get1_RSA(EVP_PKEY *pkey);
 EVP_PKEY *EVP_PKEY_new_mac_key(int type, ENGINE *e,
                                const unsigned char *key, int keylen);
 void EVP_PKEY_free(EVP_PKEY *key);
@@ -188,8 +181,18 @@ void EVP_PKEY_CTX_free(EVP_PKEY_CTX *ctx);
 
 int EVP_PKEY_CTX_ctrl(EVP_PKEY_CTX *ctx, int keytype, int optype,
                       int cmd, int p1, void *p2);
+int EVP_PKEY_CTX_set_signature_md(EVP_PKEY_CTX *ctx, const EVP_MD *md);
+int EVP_PKEY_CTX_set_rsa_padding(EVP_PKEY_CTX *ctx, int pad_mode);
 
 int EVP_PKEY_size(EVP_PKEY *pkey);
+int EVP_PKEY_sign_init(EVP_PKEY_CTX *ctx);
+int EVP_PKEY_sign(EVP_PKEY_CTX *ctx,
+                  unsigned char *sig, size_t *siglen,
+                  const unsigned char *tbs, size_t tbslen);
+int EVP_PKEY_verify_init(EVP_PKEY_CTX *ctx);
+int EVP_PKEY_verify(EVP_PKEY_CTX *ctx,
+                    const unsigned char *sig, size_t siglen,
+                    const unsigned char *tbs, size_t tbslen);
 
 int EVP_PKEY_encrypt_init(EVP_PKEY_CTX *ctx);
 int EVP_PKEY_encrypt(EVP_PKEY_CTX *ctx,
@@ -336,23 +339,21 @@ end
 
 local function _resolve_rsa_digest(digest_name)
     if digest_name == CONST.SHA256_DIGEST then
-        return CONST.NID_sha256, 32
+        return _C.EVP_get_digestbyname(digest_name), 32
     end
 
     if digest_name == CONST.SHA512_DIGEST then
-        return CONST.NID_sha512, 64
+        return _C.EVP_get_digestbyname(digest_name), 64
     end
 
     return nil, nil
 end
 
-local function _digest_message(message, digest_name)
-    local md = _C.EVP_get_digestbyname(digest_name)
+local function _digest_message(message, md, digest_len)
     if md == nil then
         return nil, "Unknown message digest"
     end
 
-    local _, digest_len = _resolve_rsa_digest(digest_name)
     if not digest_len then
         return nil, "Unsupported RSA digest"
     end
@@ -364,6 +365,41 @@ local function _digest_message(message, digest_name)
     end
 
     return digest, written[0], nil
+end
+
+local function _new_rsa_pkey_ctx(pkey, md, op)
+    if md == nil then
+        return nil, "Unknown message digest"
+    end
+
+    local ctx = _C.EVP_PKEY_CTX_new(pkey, nil)
+    if ctx == nil then
+        return _err()
+    end
+    ffi_gc(ctx, _C.EVP_PKEY_CTX_free)
+
+    local ret
+    if op == "sign" then
+        ret = _C.EVP_PKEY_sign_init(ctx)
+    else
+        ret = _C.EVP_PKEY_verify_init(ctx)
+    end
+    if ret ~= 1 then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
+        return _err()
+    end
+
+    if _C.EVP_PKEY_CTX_set_rsa_padding(ctx, CONST.RSA_PKCS1_PADDING) <= 0 then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
+        return _err()
+    end
+
+    if _C.EVP_PKEY_CTX_set_signature_md(ctx, md) <= 0 then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
+        return _err()
+    end
+
+    return ctx, nil
 end
 
 local function _sign_with_evp_pkey(pkey, message, digest_name)
@@ -446,25 +482,35 @@ end
 -- @param digest_name The digest format to use (e.g., "SHA256")
 -- @returns signature, error_string
 function RSASigner.sign(self, message, digest_name)
-    local rsa = _C.EVP_PKEY_get1_RSA(self.evp_pkey)
-    if rsa == nil then
-        return _sign_with_evp_pkey(self.evp_pkey, message, digest_name)
+    local md, digest_len = _resolve_rsa_digest(digest_name)
+    if md == nil then
+        return nil, "Unsupported RSA digest"
     end
 
-    ffi_gc(rsa, _C.RSA_free)
-
-    local digest, digest_len, err = _digest_message(message, digest_name)
-    if not digest then
+    local ctx, err = _new_rsa_pkey_ctx(self.evp_pkey, md, "sign")
+    if ctx == nil then
         return nil, err
     end
 
-    local nid = _resolve_rsa_digest(digest_name)
-    local siglen = ffi_new("unsigned int[1]", _C.RSA_size(rsa))
-    local sigbuf = ffi_new("unsigned char[?]", siglen[0])
-    if _C.RSA_sign(nid, digest, digest_len, sigbuf, siglen, rsa) ~= 1 then
+    local digest, written, digest_err = _digest_message(message, md, digest_len)
+    if not digest then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
+        return nil, digest_err
+    end
+
+    local siglen = ffi_new("size_t[1]", 0)
+    if _C.EVP_PKEY_sign(ctx, nil, siglen, digest, written) ~= 1 then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
         return _err()
     end
 
+    local sigbuf = ffi_new("unsigned char[?]", siglen[0])
+    if _C.EVP_PKEY_sign(ctx, sigbuf, siglen, digest, written) ~= 1 then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
+        return _err()
+    end
+
+    _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
     return ffi_string(sigbuf, siglen[0]), nil
 end
 
@@ -553,25 +599,30 @@ end
 -- @param digest_name The digest type that was used to sign
 -- @returns bool, error_string
 function RSAVerifier.verify(self, message, sig, digest_name)
-    local rsa = _C.EVP_PKEY_get1_RSA(self.key_source)
-    if rsa == nil then
-        return _verify_with_evp_pkey(self.key_source, message, sig, digest_name)
+    local md, digest_len = _resolve_rsa_digest(digest_name)
+    if md == nil then
+        return false, "Unsupported RSA digest"
     end
 
-    ffi_gc(rsa, _C.RSA_free)
-
-    local digest, digest_len, err = _digest_message(message, digest_name)
-    if not digest then
+    local ctx, err = _new_rsa_pkey_ctx(self.key_source, md, "verify")
+    if ctx == nil then
         return false, err
     end
 
-    local nid = _resolve_rsa_digest(digest_name)
+    local digest, written, digest_err = _digest_message(message, md, digest_len)
+    if not digest then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
+        return false, digest_err
+    end
+
     local sig_bin = ffi_new("unsigned char[?]", #sig)
     ffi_copy(sig_bin, sig, #sig)
-    if _C.RSA_verify(nid, digest, digest_len, sig_bin, #sig, rsa) == 1 then
+    if _C.EVP_PKEY_verify(ctx, sig_bin, #sig, digest, written) == 1 then
+        _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
         return true, nil
     end
 
+    _C.EVP_PKEY_CTX_free(ffi_gc(ctx, nil))
     local _, verify_err = _err(false)
     if verify_err == "Zero error code (null arguments?)" then
         return false, "Verification failed"
